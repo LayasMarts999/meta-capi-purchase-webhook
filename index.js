@@ -1,85 +1,73 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
-const axios = require('axios');
-require('dotenv').config();
+const dotenv = require('dotenv');
+
+dotenv.config(); // Load environment variables from .env
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
+const WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
-// Validate HMAC
-function verifyShopifyWebhook(req, buf) {
-  const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
-  const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+// Middleware to get raw body
+app.use(bodyParser.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString('utf8');
+  }
+}));
 
-  const digest = crypto
-    .createHmac('sha256', secret)
-    .update(buf, 'utf8')
-    .digest('base64');
-
-  return digest === hmacHeader;
-}
-
-// Middleware for raw buffer parsing (for HMAC)
-app.use('/webhook/purchase', bodyParser.raw({ type: 'application/json' }));
-
-app.post('/webhook/purchase', async (req, res) => {
+// Purchase Webhook Endpoint
+app.post('/webhook/purchase', (req, res) => {
   try {
-    // Verify HMAC
-    const isValid = verifyShopifyWebhook(req, req.body);
-    if (!isValid) {
-      console.error('❌ HMAC verification failed');
+    const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
+    const rawBody = req.rawBody;
+
+    if (!WEBHOOK_SECRET) {
+      console.error('❌ SHOPIFY_WEBHOOK_SECRET is missing in .env');
+      return res.status(500).send('Server misconfigured');
+    }
+
+    if (!hmacHeader || !rawBody) {
+      console.warn('⚠️ Missing HMAC header or body');
+      return res.status(400).send('Bad Request');
+    }
+
+    const generatedHmac = crypto
+      .createHmac('sha256', WEBHOOK_SECRET)
+      .update(rawBody, 'utf8')
+      .digest('base64');
+
+    const isVerified = crypto.timingSafeEqual(
+      Buffer.from(generatedHmac, 'utf8'),
+      Buffer.from(hmacHeader, 'utf8')
+    );
+
+    if (!isVerified) {
+      console.warn('❌ Invalid HMAC verification failed');
       return res.status(401).send('Unauthorized');
     }
 
-    // Parse JSON safely
-    let data;
-    try {
-      data = JSON.parse(req.body.toString());
-    } catch (err) {
-      console.error('❌ JSON parse error:', err.message);
-      return res.status(400).send('Invalid JSON payload');
-    }
+    // ✅ HMAC verified
+    console.log('✅ Webhook Verified');
+    console.log('📦 Purchase Webhook Data:', req.body);
 
-    // Debug logging
-    console.log('✅ Webhook data received:', data);
-
-    const event_id = `purchase-${data.id}-${Date.now()}`;
-    const payload = {
-      data: {
-        event_name: 'Purchase',
-        event_time: Math.floor(new Date(data.created_at).getTime() / 1000),
-        event_source_url: data.checkout_id
-          ? `https://${data.source_name}/checkouts/${data.checkout_id}`
-          : '',
-        action_source: 'website',
-        event_id: event_id,
-        user_data: {
-          em: [crypto.createHash('sha256').update(data.email || '').digest('hex')],
-          ph: [crypto.createHash('sha256').update((data.phone || '').replace(/\D/g, '')).digest('hex')]
-        },
-        custom_data: {
-          currency: data.currency,
-          value: data.total_price
-        }
-      }
-    };
-
-    const fbResponse = await axios.post(
-      `https://graph.facebook.com/v19.0/${process.env.META_PIXEL_ID}/events?access_token=${process.env.META_CAPI_TOKEN}`,
-      payload
-    );
-
-    console.log('✅ Meta CAPI success:', fbResponse.data);
-    res.status(200).send('Webhook received and sent to Meta');
-  } catch (err) {
-    console.error('🔥 Webhook handler error:', err.stack);
-    res.status(500).send('Server error');
+    // TODO: Send data to Meta CAPI, DB, etc.
+    return res.status(200).send('Webhook verified & received');
+  } catch (error) {
+    console.error('❌ Internal server error:', error.message);
+    return res.status(500).send('Internal Server Error');
   }
 });
 
+// Health Check
+app.get('/', (req, res) => {
+  res.send('✅ Meta CAPI Purchase Webhook is live!');
+});
+
+// Start Server
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
 
 
