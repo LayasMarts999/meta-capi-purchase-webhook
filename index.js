@@ -7,40 +7,44 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware to capture raw body
-app.use(
-  '/webhook/purchase',
-  bodyParser.raw({ type: 'application/json' })
-);
-
-// ✅ Secure HMAC verification (skipped in development mode)
-function verifyShopifyWebhook(req, rawBody) {
-  if (process.env.NODE_ENV === 'development') return true;
-
+// Validate HMAC
+function verifyShopifyWebhook(req, buf) {
   const hmacHeader = req.get('X-Shopify-Hmac-Sha256');
   const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
+
   const digest = crypto
     .createHmac('sha256', secret)
-    .update(rawBody, 'utf8')
+    .update(buf, 'utf8')
     .digest('base64');
 
-  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(hmacHeader));
+  return digest === hmacHeader;
 }
 
-// ✅ Webhook endpoint
-app.post('/webhook/purchase', (req, res) => {
+// Middleware for raw buffer parsing (for HMAC)
+app.use('/webhook/purchase', bodyParser.raw({ type: 'application/json' }));
+
+app.post('/webhook/purchase', async (req, res) => {
   try {
-    // Bypass HMAC in development
-    const isVerified = verifyShopifyWebhook(req, req.body);
-    if (!isVerified) {
-      console.error('❌ Invalid HMAC signature');
+    // Verify HMAC
+    const isValid = verifyShopifyWebhook(req, req.body);
+    if (!isValid) {
+      console.error('❌ HMAC verification failed');
       return res.status(401).send('Unauthorized');
     }
 
-    const data = JSON.parse(req.body.toString());
+    // Parse JSON safely
+    let data;
+    try {
+      data = JSON.parse(req.body.toString());
+    } catch (err) {
+      console.error('❌ JSON parse error:', err.message);
+      return res.status(400).send('Invalid JSON payload');
+    }
+
+    // Debug logging
+    console.log('✅ Webhook data received:', data);
 
     const event_id = `purchase-${data.id}-${Date.now()}`;
-
     const payload = {
       data: {
         event_name: 'Purchase',
@@ -51,35 +55,25 @@ app.post('/webhook/purchase', (req, res) => {
         action_source: 'website',
         event_id: event_id,
         user_data: {
-          em: [crypto.createHash('sha256').update(data.email).digest('hex')],
-          ph: [
-            crypto.createHash('sha256')
-              .update(data.phone.replace(/[^0-9]/g, ''))
-              .digest('hex'),
-          ],
+          em: [crypto.createHash('sha256').update(data.email || '').digest('hex')],
+          ph: [crypto.createHash('sha256').update((data.phone || '').replace(/\D/g, '')).digest('hex')]
         },
         custom_data: {
           currency: data.currency,
-          value: data.total_price,
-        },
-      },
+          value: data.total_price
+        }
+      }
     };
 
-    axios
-      .post(
-        `https://graph.facebook.com/v19.0/${process.env.META_PIXEL_ID}/events?access_token=${process.env.META_CAPI_TOKEN}`,
-        payload
-      )
-      .then((response) => {
-        console.log('✅ Meta CAPI success:', response.data);
-      })
-      .catch((error) => {
-        console.error('❌ Meta CAPI error:', error.response?.data || error.message);
-      });
+    const fbResponse = await axios.post(
+      `https://graph.facebook.com/v19.0/${process.env.META_PIXEL_ID}/events?access_token=${process.env.META_CAPI_TOKEN}`,
+      payload
+    );
 
-    res.status(200).send('✅ Webhook received and processed');
-  } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.log('✅ Meta CAPI success:', fbResponse.data);
+    res.status(200).send('Webhook received and sent to Meta');
+  } catch (err) {
+    console.error('🔥 Webhook handler error:', err.stack);
     res.status(500).send('Server error');
   }
 });
