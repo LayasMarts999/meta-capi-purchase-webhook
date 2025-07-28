@@ -82,12 +82,19 @@ app.post('/webhook/purchase', async (req, res) => {
     };
 
     const url = `https://graph.facebook.com/v19.0/${META_PIXEL_ID}/events?access_token=${META_CAPI_TOKEN}`;
+
+    // 🔍 Debug logging
+    console.log('📦 Payload to Meta CAPI:\n', JSON.stringify(payload, null, 2));
+    console.log('🔗 URL:', url);
+
     const fbRes = await axios.post(url, payload);
 
     console.log('✅ Meta CAPI sent successfully:', fbRes.data);
     res.status(200).send('Webhook received and sent to Meta CAPI');
   } catch (err) {
     console.error('❌ Webhook processing error:', err.message);
+    console.error('❌ Full error:', err);
+    console.error('❌ Stack trace:', err.stack);
     res.status(500).send('Internal Server Error');
   }
 });
@@ -101,6 +108,8 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
+
+
 
 
 
